@@ -1,7 +1,7 @@
 import { handler } from './evaluateContent';
 import { HookEventType, PluginContext, PluginParameters } from '../types';
 
-// Mock the @alice-io/wonderfence-ts-sdk
+// Mock the @alice-io/wonderfence-ts-sdk (V2 client)
 jest.mock('@alice-io/wonderfence-ts-sdk', () => {
   const Actions = {
     BLOCK: 'BLOCK',
@@ -20,7 +20,7 @@ jest.mock('@alice-io/wonderfence-ts-sdk', () => {
   const mockEvaluatePrompt = jest.fn();
   const mockEvaluateResponse = jest.fn();
 
-  const WonderFenceClient = jest.fn().mockImplementation((config: any) => {
+  const WonderFenceV2Client = jest.fn().mockImplementation((config: any) => {
     if (!config?.apiKey) {
       throw new ConfigurationError(
         'API key is required. Set ALICE_API_KEY environment variable or pass apiKey parameter.'
@@ -33,7 +33,7 @@ jest.mock('@alice-io/wonderfence-ts-sdk', () => {
   });
 
   return {
-    WonderFenceClient,
+    WonderFenceV2Client,
     Actions,
     ConfigurationError,
     __mockEvaluatePrompt: mockEvaluatePrompt,
@@ -45,6 +45,9 @@ const {
   __mockEvaluatePrompt: mockEvaluatePrompt,
   __mockEvaluateResponse: mockEvaluateResponse,
 } = jest.requireMock('@alice-io/wonderfence-ts-sdk');
+
+// A representative app_id UUID for tests.
+const APP_ID = '11111111-1111-4111-8111-111111111111';
 
 const baseContext: PluginContext = {
   requestType: 'chatComplete',
@@ -67,13 +70,16 @@ const baseContext: PluginContext = {
 const baseParameters: PluginParameters = {
   credentials: {
     apiKey: 'test-api-key',
-    appName: 'test-app',
+    appId: APP_ID,
   },
 };
 
 describe('alice-wonderfence evaluateContent', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    // Tests pin credentials explicitly; ensure an ambient env key never leaks
+    // into the resolution path (it would mask the missing-apiKey case).
+    delete process.env.ALICE_API_KEY;
   });
 
   describe('BLOCK action', () => {
@@ -285,36 +291,39 @@ describe('alice-wonderfence evaluateContent', () => {
     });
   });
 
-  describe('fail-open behavior', () => {
-    it('should return verdict true when credentials are missing', async () => {
+  describe('misconfiguration (never fail-open)', () => {
+    // The block reason must be carried in `data`, not `error`: the gateway
+    // treats a check returning a truthy `error` as a pass (unless failOnError),
+    // so a misconfig must return `error: null` + `verdict: false` to deny.
+    it('should block (no error) when apiKey is missing, regardless of failOpen', async () => {
       const result = await handler(
         baseContext,
-        { credentials: {} },
+        { credentials: { appId: APP_ID } },
         'beforeRequestHook',
         undefined
       );
 
-      expect(result.verdict).toBe(true);
-      expect(result.error).toBeDefined();
-      expect(result.error.message).toContain('API key is required');
-      expect(result.error).not.toHaveProperty('stack');
+      expect(result.verdict).toBe(false);
+      expect(result.error).toBeNull();
+      expect(result.data.reason).toContain('apiKey is not configured');
+      expect(mockEvaluatePrompt).not.toHaveBeenCalled();
     });
 
-    it('should return verdict true when apiKey is missing', async () => {
+    it('should block (no error) when appId is missing, regardless of failOpen', async () => {
       const result = await handler(
         baseContext,
-        { credentials: { appName: 'test' } },
+        { credentials: { apiKey: 'test-api-key' }, failOpen: true },
         'beforeRequestHook',
         undefined
       );
 
-      expect(result.verdict).toBe(true);
-      expect(result.error).toBeDefined();
-      expect(result.error.message).toContain('API key is required');
-      expect(result.error).not.toHaveProperty('stack');
+      expect(result.verdict).toBe(false);
+      expect(result.error).toBeNull();
+      expect(result.data.reason).toContain('appId is not configured');
+      expect(mockEvaluatePrompt).not.toHaveBeenCalled();
     });
 
-    it('should return verdict true when no credentials provided at all', async () => {
+    it('should block (no error) when no credentials provided at all', async () => {
       const result = await handler(
         baseContext,
         {},
@@ -322,11 +331,14 @@ describe('alice-wonderfence evaluateContent', () => {
         undefined
       );
 
-      expect(result.verdict).toBe(true);
-      expect(result.error).toBeDefined();
-      expect(result.error).not.toHaveProperty('stack');
+      expect(result.verdict).toBe(false);
+      expect(result.error).toBeNull();
+      expect(result.data.reason).toBeDefined();
+      expect(mockEvaluatePrompt).not.toHaveBeenCalled();
     });
+  });
 
+  describe('fail-open behavior (runtime errors)', () => {
     it('should return verdict true when SDK throws an error', async () => {
       mockEvaluatePrompt.mockRejectedValue(new Error('SDK connection error'));
 
@@ -368,27 +380,112 @@ describe('alice-wonderfence evaluateContent', () => {
       );
 
       expect(result.verdict).toBe(false);
-      expect(result.error).toBeDefined();
-      expect(result.error).not.toHaveProperty('stack');
-      expect(result.data).toBeNull();
+      // Fail-closed must NOT carry an `error` (gateway would treat it as a pass);
+      // the reason lives in `data` and verdict false is what denies.
+      expect(result.error).toBeNull();
+      expect(result.data.reason).toContain('evaluation error');
     });
+  });
 
-    it('should return verdict false when failOpen is false and credentials are missing', async () => {
+  describe('credential resolution', () => {
+    it('should not use request metadata appId when override is disabled (default)', async () => {
+      const contextWithMetaAppId = {
+        ...baseContext,
+        metadata: {
+          ...baseContext.metadata,
+          alice_wonderfence_app_id: APP_ID,
+        },
+      };
+
       const result = await handler(
-        baseContext,
-        { credentials: {}, failOpen: false },
+        contextWithMetaAppId,
+        { credentials: { apiKey: 'test-api-key' } },
         'beforeRequestHook',
         undefined
       );
 
+      // appId only in metadata + override off => misconfiguration => block
       expect(result.verdict).toBe(false);
-      expect(result.error).toBeDefined();
-      expect(result.error.message).toContain('API key is required');
+      expect(result.error).toBeNull();
+      expect(result.data.reason).toContain('appId is not configured');
+      expect(mockEvaluatePrompt).not.toHaveBeenCalled();
+    });
+
+    it('should use request metadata appId when override is enabled', async () => {
+      mockEvaluatePrompt.mockResolvedValue({
+        action: '',
+        correlationId: 'corr-override',
+        detections: [],
+        errors: [],
+      });
+
+      const contextWithMetaAppId = {
+        ...baseContext,
+        metadata: {
+          ...baseContext.metadata,
+          alice_wonderfence_app_id: APP_ID,
+        },
+      };
+
+      const result = await handler(
+        contextWithMetaAppId,
+        {
+          credentials: { apiKey: 'test-api-key' },
+          allowRequestMetadataOverride: true,
+        },
+        'beforeRequestHook',
+        undefined
+      );
+
+      expect(result.verdict).toBe(true);
+      expect(mockEvaluatePrompt).toHaveBeenCalledWith(
+        APP_ID,
+        expect.any(Object),
+        'Hello, how are you?',
+        undefined,
+        undefined
+      );
+    });
+
+    it('should prefer config appId over request metadata appId', async () => {
+      mockEvaluatePrompt.mockResolvedValue({
+        action: '',
+        correlationId: 'corr-pref',
+        detections: [],
+        errors: [],
+      });
+
+      const otherAppId = '22222222-2222-4222-8222-222222222222';
+      const contextWithMetaAppId = {
+        ...baseContext,
+        metadata: {
+          ...baseContext.metadata,
+          alice_wonderfence_app_id: otherAppId,
+        },
+      };
+
+      await handler(
+        contextWithMetaAppId,
+        {
+          credentials: { apiKey: 'test-api-key', appId: APP_ID },
+          allowRequestMetadataOverride: true,
+        },
+        'beforeRequestHook',
+        undefined
+      );
+
+      expect(mockEvaluatePrompt).toHaveBeenCalledWith(
+        APP_ID,
+        expect.any(Object),
+        'Hello, how are you?',
+        undefined,
+        undefined
+      );
     });
   });
 
   describe('context extraction', () => {
-    it('should pass analysisContext with metadata fields', async () => {
+    it('should pass appId and analysisContext with metadata fields', async () => {
       mockEvaluatePrompt.mockResolvedValue({
         action: '',
         correlationId: 'corr-7',
@@ -404,6 +501,7 @@ describe('alice-wonderfence evaluateContent', () => {
       );
 
       expect(mockEvaluatePrompt).toHaveBeenCalledWith(
+        APP_ID,
         expect.objectContaining({
           sessionId: 'sess-123',
           userId: 'user-456',
@@ -437,6 +535,7 @@ describe('alice-wonderfence evaluateContent', () => {
       );
 
       expect(mockEvaluatePrompt).toHaveBeenCalledWith(
+        APP_ID,
         expect.objectContaining({
           sessionId: 'trace-789',
         }),

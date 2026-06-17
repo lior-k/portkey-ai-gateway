@@ -13,7 +13,9 @@ Content moderation guardrails powered by [Alice WonderFence](https://alice.io/pr
 ## Prerequisites
 
 - Node.js 18+, npm
-- A WonderFence API key and app name
+- A WonderFence **API key** and an **app ID** (UUID). The app ID identifies the
+  application whose policy set WonderFence applies; obtain it from the
+  Alice/WonderFence console when you create an app.
 
 ## Setup
 
@@ -30,16 +32,19 @@ npm install
 npm install @alice-io/wonderfence-ts-sdk
 ```
 
-### 3. Set credentials as environment variables
+### 3. Provide credentials
 
-Export your WonderFence credentials before starting the gateway:
+Set the API key per guardrail via `credentials` in the check `parameters`
+(recommended — see below), or export it as a fallback env var before starting
+the gateway:
 
 ```bash
 export ALICE_API_KEY="your-wonderfence-api-key"
-export ALICE_APP_NAME="your-app-name"
 ```
 
-The SDK reads these automatically — no additional credential configuration is needed.
+The `appId` (UUID) has **no env fallback** — it must come from the guardrail
+`credentials` (or, when `allowRequestMetadataOverride` is enabled, from
+`x-portkey-metadata`).
 
 ### 4. Enable the plugin in `conf.json`
 
@@ -80,6 +85,10 @@ curl -X POST http://localhost:8787/v1/chat/completions \
       "checks": [{
         "id": "alice-wonderfence.evaluateContent",
         "parameters": {
+          "credentials": {
+            "apiKey": "your-wonderfence-api-key",
+            "appId": "11111111-1111-4111-8111-111111111111"
+          },
           "debug": true
         }
       }]
@@ -106,12 +115,27 @@ curl -X POST http://localhost:8787/v1/chat/completions \
 
 Parameters are passed inside each check's `parameters` object.
 
-| Parameter      | Type                           | Default       | Description                                                                                                              |
-| -------------- | ------------------------------ | ------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `credentials`  | `{ apiKey, appName }`          | From env vars | WonderFence API credentials. Per-request credentials override environment variables (`ALICE_API_KEY`, `ALICE_APP_NAME`). |
-| `debug`        | `boolean`                      | `false`       | Include `textExcerpt` in hook data and log text/masked excerpts on MASK actions.                                         |
-| `failOpen`     | `boolean`                      | `true`        | On SDK/network errors: `true` = allow request through, `false` = block.                                                  |
-| `customFields` | `CustomField[]` or JSON string | —             | Custom fields forwarded to the WonderFence API for analysis context.                                                     |
+| Parameter                      | Type                           | Default | Description                                                                                                                                                |
+| ------------------------------ | ------------------------------ | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `credentials`                  | `{ apiKey, appId, baseUrl }`   | —       | WonderFence API credentials. `apiKey` falls back to the `ALICE_API_KEY` env var; `appId` (UUID) has no fallback. `baseUrl` overrides the API base URL.     |
+| `allowRequestMetadataOverride` | `boolean`                      | `false` | When `true`, `x-portkey-metadata` may supply `alice_wonderfence_api_key` / `alice_wonderfence_app_id`, used only after config `credentials` are absent.    |
+| `debug`                        | `boolean`                      | `false` | Include `textExcerpt` in hook data and log text/masked excerpts on MASK actions.                                                                           |
+| `failOpen`                     | `boolean`                      | `true`  | On SDK/network errors: `true` = allow request through, `false` = block. Does **not** apply to missing `apiKey`/`appId` — a misconfiguration always blocks. |
+| `customFields`                 | `CustomField[]` or JSON string | —       | Custom fields forwarded to the WonderFence API for analysis context.                                                                                       |
+
+### Credential resolution & per-team apps
+
+`apiKey` and `appId` are resolved per request with admin-pinned config winning:
+
+1. `parameters.credentials.{apiKey,appId}` (from the config attached to a
+   Portkey API key — admin-pinned)
+2. `x-portkey-metadata.alice_wonderfence_{api_key,app_id}` — **only if**
+   `allowRequestMetadataOverride: true` (so callers can't bypass pinned creds)
+3. `apiKey` only: `ALICE_API_KEY` env var
+
+To run **different apps/teams** through the same gateway, attach a distinct
+config (hence distinct `credentials.appId`) to each Portkey API key — the
+equivalent of LiteLLM's per-key/per-team metadata.
 
 ## `deny` Behavior
 
@@ -148,3 +172,5 @@ These use the same hook format as `before_request_hooks` / `after_request_hooks`
 ## Error Policy
 
 **Default: fail-open.** On any SDK or network error the request is allowed through. Set `failOpen: false` in check parameters to fail-closed instead (block on error).
+
+**Misconfiguration always blocks.** A missing/unresolvable `apiKey` or `appId` is treated as a configuration error and blocks the request regardless of `failOpen`, so a misconfigured guardrail never silently bypasses scanning.

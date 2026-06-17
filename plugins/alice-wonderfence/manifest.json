@@ -6,7 +6,7 @@
     "type": "object",
     "properties": {
       "apiKey": { "type": "string", "label": "API Key", "encrypted": true },
-      "appName": { "type": "string", "label": "Application Name" },
+      "appId": { "type": "string", "label": "Application ID (UUID)" },
       "baseUrl": {
         "type": "string",
         "label": "Base URL",
@@ -57,10 +57,21 @@
             "description": [
               {
                 "type": "subHeading",
-                "text": "If true, requests are allowed through when the guardrail API encounters an error. If false, requests are blocked on error. Default: true."
+                "text": "If true, requests are allowed through when the guardrail API encounters an error. If false, requests are blocked on error. Default: true. Does not apply to missing apiKey/appId — a misconfiguration always blocks."
               }
             ],
             "default": true
+          },
+          "allowRequestMetadataOverride": {
+            "type": "boolean",
+            "label": "Allow Request Metadata Override",
+            "description": [
+              {
+                "type": "subHeading",
+                "text": "If true, per-request x-portkey-metadata may supply alice_wonderfence_api_key / alice_wonderfence_app_id, taking effect only after config credentials are absent. Default: false so caller-controlled fields cannot bypass admin-pinned credentials."
+              }
+            ],
+            "default": false
           }
         }
       }
